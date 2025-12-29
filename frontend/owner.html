@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Owner Fleet</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    input, select, button { padding: 8px; margin-right: 8px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 14px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background: #f5f5f5; }
+    .badge { padding: 2px 8px; border-radius: 10px; display: inline-block; }
+  </style>
+</head>
+<body>
+  <h2>Owner Fleet Management</h2>
+
+  <h3>Add Truck</h3>
+  <div>
+    <input id="truckId" placeholder="truck-201" />
+    <select id="truckType">
+      <option value="pickup">pickup</option>
+      <option value="box">box</option>
+      <option value="semi">semi</option>
+    </select>
+    <select id="truckStatus">
+      <option value="available">available</option>
+      <option value="out_of_service">out_of_service</option>
+    </select>
+    <button id="addBtn">Add</button>
+  </div>
+
+  <h3>Trucks</h3>
+  <button id="refreshBtn">Refresh</button>
+  <div id="msg"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Truck ID</th>
+        <th>Type</th>
+        <th>Status</th>
+        <th>Change Status</th>
+        <th>Updated</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+<script>
+const API = "http://localhost:8000";
+
+const msg = (t) => document.getElementById("msg").textContent = t;
+
+async function refresh() {
+  msg("");
+  const res = await fetch(`${API}/api/owners/me/trucks`);
+  const data = await res.json();
+
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+
+  data.forEach(truck => {
+    const tr = document.createElement("tr");
+
+    tr.innerHTML = `
+      <td>${truck.truck_id}</td>
+      <td>${truck.type}</td>
+      <td><span class="badge">${truck.status}</span></td>
+      <td>
+        <select data-truck="${truck.truck_id}">
+          <option value="available" ${truck.status === "available" ? "selected": ""}>available</option>
+          <option value="out_of_service" ${truck.status === "out_of_service" ? "selected": ""}>out_of_service</option>
+        </select>
+        <button data-save="${truck.truck_id}">Save</button>
+      </td>
+      <td>${new Date(truck.updated_at).toLocaleString()}</td>
+    `;
+
+    tbody.appendChild(tr);
+  });
+
+  // wire up save buttons
+  document.querySelectorAll("button[data-save]").forEach(btn => {
+    btn.onclick = async () => {
+      const truckId = btn.getAttribute("data-save");
+      const sel = document.querySelector(`select[data-truck="${truckId}"]`);
+      const status = sel.value;
+
+      const r = await fetch(`${API}/api/trucks/${truckId}`, {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({status})
+      });
+
+      if (!r.ok) {
+        const e = await r.json();
+        msg(`Error: ${e.detail || r.status}`);
+        return;
+      }
+
+      msg(`Updated ${truckId} → ${status}`);
+      await refresh();
+    };
+  });
+}
+
+document.getElementById("addBtn").onclick = async () => {
+  const truck_id = document.getElementById("truckId").value.trim();
+  const type = document.getElementById("truckType").value;
+  const status = document.getElementById("truckStatus").value;
+
+  if (!truck_id) { msg("truck_id required"); return; }
+
+  const res = await fetch(`${API}/api/owners/me/trucks`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({truck_id, type, status})
+  });
+
+  const out = await res.json();
+  if (!res.ok) {
+    msg(`Error: ${out.detail || res.status}`);
+    return;
+  }
+
+  msg(`Added ${out.truck_id}`);
+  document.getElementById("truckId").value = "";
+  await refresh();
+};
+
+document.getElementById("refreshBtn").onclick = refresh;
+
+refresh();
+</script>
+</body>
+</html>
