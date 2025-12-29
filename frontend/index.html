@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Truck Tracker MVP</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    button { padding: 10px 12px; margin-right: 10px; }
+    #log { white-space: pre-wrap; background: #f5f5f5; padding: 10px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h2>Driver Page</h2>
+  <div>
+    Truck ID:
+    <input id="truckId" value="truck-101" />
+    <button id="start">Start Sharing</button>
+    <button id="stop">Stop</button>
+  </div>
+  <p id="status">Status: idle</p>
+  <div id="log"></div>
+
+  <hr />
+
+  <h2>Owner Page (Live feed)</h2>
+  <div>
+    Watch Truck ID:
+    <input id="watchTruckId" value="truck-101" />
+    <button id="watch">Watch</button>
+  </div>
+  <p id="ownerStatus">Owner Status: not connected</p>
+  <div id="ownerLog"></div>
+
+<script>
+const API = "http://127.0.0.1:8000";
+let timer = null;
+let ws = null;
+
+function log(el, msg) {
+  el.textContent = (new Date().toLocaleTimeString()) + " - " + msg + "\n" + el.textContent;
+}
+
+document.getElementById("start").onclick = () => {
+  const truckId = document.getElementById("truckId").value.trim();
+  const status = document.getElementById("status");
+  const logEl = document.getElementById("log");
+
+  if (!truckId) return;
+
+  status.textContent = "Status: sharing...";
+
+  timer = setInterval(async () => {
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const payload = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        speed: pos.coords.speed
+      };
+
+      await fetch(`${API}/api/trucks/${truckId}/location`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      log(logEl, `sent lat=${payload.lat.toFixed(5)} lng=${payload.lng.toFixed(5)}`);
+    }, (err) => {
+      log(logEl, "GPS error: " + err.message);
+    }, { enableHighAccuracy: true });
+  }, 5000);
+};
+
+document.getElementById("stop").onclick = () => {
+  const status = document.getElementById("status");
+  if (timer) clearInterval(timer);
+  timer = null;
+  status.textContent = "Status: stopped";
+};
+
+document.getElementById("watch").onclick = () => {
+  const truckId = document.getElementById("watchTruckId").value.trim();
+  const ownerStatus = document.getElementById("ownerStatus");
+  const ownerLog = document.getElementById("ownerLog");
+
+  if (ws) ws.close();
+
+  ws = new WebSocket(`${API.replace("http", "ws")}/ws/trucks/${truckId}`);
+  ownerStatus.textContent = "Owner Status: connecting...";
+
+  ws.onopen = () => ownerStatus.textContent = "Owner Status: connected";
+  ws.onclose = () => ownerStatus.textContent = "Owner Status: disconnected";
+  ws.onerror = () => ownerStatus.textContent = "Owner Status: error";
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    ownerLog.textContent =
+      `Truck: ${data.truck_id}\n` +
+      `Lat: ${data.lat}\nLng: ${data.lng}\n` +
+      `Speed: ${data.speed}\n` +
+      `Time(UTC): ${data.ts}\n\n` +
+      ownerLog.textContent;
+  };
+
+  // keep-alive ping every 25s so ws.receive_text() doesn't block forever
+  setInterval(() => {
+    if (ws && ws.readyState === 1) ws.send("ping");
+  }, 25000);
+};
+</script>
+</body>
+</html>
