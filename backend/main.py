@@ -69,6 +69,17 @@ class TruckOut(BaseModel):
     status: TruckStatus
     created_at: datetime
     updated_at: datetime
+    
+class TruckPublic(BaseModel):
+    truck_id: str
+    type: str
+    status: Literal["available"]
+
+class BookingCreate(BaseModel):
+    truck_id: str
+    customer_name: str
+    pickup_location: str
+    drop_location: str
 
 # -----------------------------
 # Startup: indexes
@@ -212,3 +223,52 @@ async def ws_truck(websocket: WebSocket, truck_id: str):
             await websocket.receive_text()
     except WebSocketDisconnect:
         subscribers[truck_id].discard(websocket)
+
+# -----------------------------
+# Customer-facing Endpoint
+# -----------------------------
+@app.get("/api/trucks/available", response_model=list[TruckPublic])
+async def get_available_trucks():
+    cursor = db.trucks.find(
+        {"status": "available"},
+        {"_id": 0, "truck_id": 1, "type": 1, "status": 1}
+    )
+
+    trucks = []
+    async for doc in cursor:
+        trucks.append(doc)
+
+    return trucks
+
+# -----------------------------
+# Customer-Booking Endpoint
+# -----------------------------
+
+@app.post("/api/bookings")
+async def create_booking(payload: BookingCreate):
+    # check truck exists and is available
+    truck = await db.trucks.find_one(
+        {"truck_id": payload.truck_id, "status": "available"}
+    )
+
+    if not truck:
+        raise HTTPException(status_code=400, detail="Truck not available")
+
+    booking = {
+        "truck_id": payload.truck_id,
+        "customer_name": payload.customer_name,
+        "pickup_location": payload.pickup_location,
+        "drop_location": payload.drop_location,
+        "status": "confirmed",
+        "created_at": datetime.utcnow()
+    }
+
+    await db.bookings.insert_one(booking)
+
+    # lock the truck
+    await db.trucks.update_one(
+        {"truck_id": payload.truck_id},
+        {"$set": {"status": "unavailable"}}
+    )
+
+    return {"ok": True, "booking": booking}
