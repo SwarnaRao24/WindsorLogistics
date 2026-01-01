@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Customer – Book a Truck</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    input, button { padding: 8px; margin-right: 6px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 14px; }
+    th, td { border: 1px solid #ddd; padding: 10px; }
+    th { background: #f5f5f5; }
+    #msg { margin-top: 10px; padding: 8px; }
+    .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+    .err { background: #ffecec; border: 1px solid #ffb3b3; }
+  </style>
+</head>
+
+<body>
+<h2>Available Trucks</h2>
+
+<div>
+    <input id="name" placeholder="Your name" />
+    <input id="pickup" placeholder="Pickup location" />
+    <input id="drop" placeholder="Drop location" />
+  
+    <!-- NEW: booking date + time -->
+    <input id="bookingDate" type="date" />
+    <input id="bookingTime" type="time" />
+  <button id="refreshBtn">Refresh</button>
+</div>
+
+<div id="msg"></div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Truck ID</th>
+      <th>Type</th>
+      <th>Status</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+  const host = window.location.hostname || "127.0.0.1";
+  const API = `http://${host}:8000`;
+
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = (typeof text === "string") ? text : JSON.stringify(text, null, 2);
+  }
+
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  async function loadTrucks() {
+    msg("");
+
+    try {
+      const res = await fetch(`${API}/api/trucks/available`);
+      const out = await safeJson(res);
+
+      if (!res.ok) {
+        msg(`Load failed (${res.status}): ${out?.detail || "Unknown error"}`, "err");
+        return;
+      }
+
+      if (!Array.isArray(out)) {
+        msg(`Unexpected response: ${JSON.stringify(out)}`, "err");
+        return;
+      }
+
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = "";
+
+      if (out.length === 0) {
+        msg("No trucks available right now.", "ok");
+        return;
+      }
+
+      out.forEach(t => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${t.truck_id}</td>
+          <td>${t.type}</td>
+          <td>${t.status}</td>
+          <td><button data-id="${t.truck_id}">Book</button></td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      document.querySelectorAll("button[data-id]").forEach(btn => {
+        btn.onclick = () => book(btn.dataset.id);
+      });
+
+    } catch (e) {
+      msg(`Network/CORS error: ${e.message}`, "err");
+    }
+  }
+
+  async function book(truck_id) {
+    const customer_name = document.getElementById("name").value.trim();
+    const pickup_location = document.getElementById("pickup").value.trim();
+    const drop_location = document.getElementById("drop").value.trim();
+    const booking_date = document.getElementById("bookingDate")?.value; // if you added date
+    const booking_time = document.getElementById("bookingTime").value;
+
+    if (!customer_name || !pickup_location || !drop_location) {
+      msg("Fill all fields before booking", "err");
+      return;
+    }
+
+    if (!booking_date || !booking_time) {
+        msg("Select booking date and time", "err");
+        return;
+      }
+      
+    try {
+      const res = await fetch(`${API}/api/bookings`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            truck_id,
+            customer_name,
+            pickup_location,
+            drop_location,
+            booking_date,
+            booking_time
+          })
+      });
+
+      const out = await safeJson(res);
+
+      if (!res.ok) {
+        msg(`Booking failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+        return;
+      }
+
+      const customer = customer_name; // already trimmed
+      msg(
+  `Dear ${customer}, your booking for ${out.booking.truck_id} is confirmed. Booking ID: ${out.booking.booking_id}`,
+  "ok"
+);      
+      await loadTrucks();
+
+    } catch (e) {
+      msg(`Network error: ${e.message}`, "err");
+    }
+  }  
+
+  document.getElementById("refreshBtn").onclick = loadTrucks;
+  // Set default booking date = today
+  document.getElementById("bookingDate").value = new Date().toISOString().slice(0,10);
+// Load available trucks
+loadTrucks();
+</script>
+</body>
+</html>

@@ -3,12 +3,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import uuid
 import certifi
 from datetime import date, datetime, timezone
 from typing import Literal, Optional, List, Dict, Set
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -20,6 +24,13 @@ from pymongo import ReturnDocument
 # -----------------------------
 app = FastAPI()
 
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+if not FRONTEND_DIR.exists():
+    raise RuntimeError(f"Frontend folder not found at: {FRONTEND_DIR}")
+
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
 # Allow http://localhost:anyport and http://127.0.0.1:anyport
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +39,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 
 # -----------------------------
 # MongoDB
@@ -50,7 +63,10 @@ subscribers: Dict[str, Set[WebSocket]] = {}
 OwnerID = "owner-1"
 
 TruckType = Literal["pickup", "box", "semi"]
-TruckStatus = Literal["available", "out_of_service", "unavailable"]  # <-- THIS LINE GOES HERE
+TruckStatus = Literal["available", "out_of_service", "booked"]  # <-- THIS LINE GOES HERE
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 class TruckCreate(BaseModel):
     truck_id: str = Field(min_length=2, max_length=64)
@@ -96,21 +112,30 @@ class BookingOut(BaseModel):
 # -----------------------------
 # Startup: indexes (safe)
 # -----------------------------
+async def ensure_indexes():
+    # trucks
+    await db.trucks.create_index(
+        [("owner_id", 1), ("truck_id", 1)],
+        unique=True,
+        name="uniq_owner_truck"
+    )
+    await db.trucks.create_index([("truck_id", 1)], name="idx_truck_id")
+
+    # bookings (strict)
+    await db.bookings.create_index([("booking_id", 1)], unique=True, name="uniq_booking_id")
+    await db.bookings.create_index([("trip_id", 1)], unique=True, name="uniq_booking_trip_id")
+    await db.bookings.create_index([("truck_id", 1), ("created_at", -1)], name="idx_booking_truck_created")
+
+    # trips (strict)
+    await db.trips.create_index([("trip_id", 1)], unique=True, name="uniq_trip_id")
+    await db.trips.create_index([("owner_id", 1), ("created_at", -1)], name="idx_trip_owner_created")
+    await db.trips.create_index([("truck_id", 1), ("created_at", -1)], name="idx_trip_truck_created")
+
 @app.on_event("startup")
 async def startup():
-    # trucks: unique per owner
-    await db.trucks.create_index([("owner_id", 1), ("truck_id", 1)], unique=True)
-    await db.trucks.create_index([("truck_id", 1)])
-    await db.truck_current_location.create_index([("truck_id", 1)], unique=True)
-
-    # bookings: safe unique booking_id (partial index avoids old docs missing booking_id)
-    # NOTE: if you already had a broken "booking_id_1" unique index, DROP IT in Atlas first.
-    await db.bookings.create_index(
-        [("booking_id", 1)],
-        unique=True,
-        partialFilterExpression={"booking_id": {"$exists": True, "$type": "string"}},
-    )
-    await db.bookings.create_index([("truck_id", 1)])
+    await client.admin.command("ping")   # hard fail if DB down
+    await ensure_indexes()
+    print("✅ Mongo connected + indexes ready")
 
 
 # -----------------------------
@@ -124,7 +149,13 @@ async def root():
 async def health():
     return {"ok": True}
 
+@app.get("/owner.html")
+def owner_html_page():
+    return FileResponse(FRONTEND_DIR / "owner.html")
 
+@app.get("/customer.html")
+def customer_html_page():
+    return FileResponse(FRONTEND_DIR / "customer.html")
 # -----------------------------
 # Owner Fleet
 # -----------------------------
@@ -198,42 +229,55 @@ async def get_available_trucks():
 # -----------------------------
 # Customer: booking (FIXED: atomic lock)
 # -----------------------------
-@app.post("/api/bookings", response_model=BookingOut)
+@app.post("/api/bookings")
 async def create_booking(payload: BookingCreate):
-    truck_id = payload.truck_id.strip()
+
     now = datetime.now(timezone.utc)
 
-    # 1) ATOMIC LOCK: only one request can flip available -> unavailable
-    locked_truck = await db.trucks.find_one_and_update(
+    # ✅ Atomic lock: only one request can book the truck
+    truck = await db.trucks.find_one_and_update(
         {"truck_id": payload.truck_id, "status": "available"},
-        {"$set": {"status": "unavailable", "updated_at": datetime.now(timezone.utc)}},
+        {"$set": {"status": "booked", "updated_at": now}},
         projection={"_id": 0},
         return_document=ReturnDocument.AFTER,
     )
-
-    if not locked_truck:
-        # If it wasn't available, do NOT create booking.
+    if not truck:
         raise HTTPException(status_code=400, detail="Truck not available")
 
-    booking_id = f"bk-{uuid4().hex[:10]}"
+    booking_id = new_id("bk")
+    trip_id = new_id("tr")
 
-   
-    # 2) Create booking AFTER locking
-    booking = {
-    "booking_id": booking_id,
+    booking_doc = {
+        "booking_id": booking_id,
+        "trip_id": trip_id,
         "truck_id": payload.truck_id,
         "customer_name": payload.customer_name,
         "pickup_location": payload.pickup_location,
         "drop_location": payload.drop_location,
         "booking_date": payload.booking_date,
         "booking_time": payload.booking_time,
-        "status": "confirmed",
-        "created_at": datetime.now(timezone.utc)
-}
+        "status": "created",
+        "created_at": now
+    }
 
+    result1 = await db.bookings.insert_one(booking_doc)
 
-    await db.bookings.insert_one(booking)
-    return booking
+    trip_doc = {
+        "trip_id": trip_id,
+        "booking_id": booking_id,
+        "owner_id": truck["owner_id"],
+        "truck_id": payload.truck_id,
+        "status": "scheduled",
+        "created_at": now,
+        "updated_at": now
+    }
+    result2 = await db.trips.insert_one(trip_doc)
+
+    return {
+        "ok": True,
+        "booking": {**booking_doc, "_id": str(result1.inserted_id)},
+        "trip": {**trip_doc, "_id": str(result2.inserted_id)},
+    }
 
 
 # -----------------------------
@@ -253,7 +297,7 @@ async def update_location(truck_id: str, payload: dict):
         "lat": float(lat),
         "lng": float(lng),
         "speed": float(speed) if speed is not None else None,
-        "ts": datetime.utcnow(),
+        "ts": datetime.now(timezone.utc),
     }
 
     await db.truck_current_location.update_one(
@@ -278,6 +322,11 @@ async def update_location(truck_id: str, payload: dict):
 async def get_location(truck_id: str):
     doc = await db.truck_current_location.find_one({"truck_id": truck_id}, {"_id": 0})
     return doc or {"truck_id": truck_id, "lat": None, "lng": None, "ts": None}
+
+@app.get("/api/owners/me/trips")
+async def owner_list_trips():
+    cursor = db.trips.find({"owner_id": OwnerID}, {"_id": 0}).sort("created_at", -1)
+    return await cursor.to_list(length=500)
 
 @app.websocket("/ws/trucks/{truck_id}")
 async def ws_truck(websocket: WebSocket, truck_id: str):

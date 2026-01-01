@@ -10,6 +10,9 @@
     th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
     th { background: #f5f5f5; }
     .badge { padding: 2px 8px; border-radius: 10px; display: inline-block; }
+    #msg { margin-top: 10px; padding: 8px; }
+    .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+    .err { background: #ffecec; border: 1px solid #ffb3b3; }
   </style>
 </head>
 <body>
@@ -26,6 +29,7 @@
     <select id="truckStatus">
       <option value="available">available</option>
       <option value="out_of_service">out_of_service</option>
+      <option value="unavailable">unavailable</option>
     </select>
     <button id="addBtn">Add</button>
   </div>
@@ -48,90 +52,133 @@
   </table>
 
 <script>
-const API = "http://localhost:8000";
+  const host = window.location.hostname || "127.0.0.1";
+  const API = `http://${host}:8000`;
 
-const msg = (t) => document.getElementById("msg").textContent = t;
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = text || "";
+  }
 
-async function refresh() {
-  msg("");
-  const res = await fetch(`${API}/api/owners/me/trucks`);
-  const data = await res.json();
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
 
-  const tbody = document.getElementById("rows");
-  tbody.innerHTML = "";
+  function getUpdated(truck) {
+    return truck.updated_at || truck.updatedAt || truck.ts || truck.created_at || null;
+  }
 
-  data.forEach(truck => {
-    const tr = document.createElement("tr");
+  async function refresh() {
+    msg("");
 
-    tr.innerHTML = `
-      <td>${truck.truck_id}</td>
-      <td>${truck.type}</td>
-      <td><span class="badge">${truck.status}</span></td>
-      <td>
-        <select data-truck="${truck.truck_id}">
-          <option value="available" ${truck.status === "available" ? "selected": ""}>available</option>
-          <option value="out_of_service" ${truck.status === "out_of_service" ? "selected": ""}>out_of_service</option>
-        </select>
-        <button data-save="${truck.truck_id}">Save</button>
-      </td>
-      <td>${new Date(truck.updated_at).toLocaleString()}</td>
-    `;
+    try {
+      const res = await fetch(`${API}/api/owners/me/trucks`);
+      const out = await safeJson(res);
 
-    tbody.appendChild(tr);
-  });
-
-  // wire up save buttons
-  document.querySelectorAll("button[data-save]").forEach(btn => {
-    btn.onclick = async () => {
-      const truckId = btn.getAttribute("data-save");
-      const sel = document.querySelector(`select[data-truck="${truckId}"]`);
-      const status = sel.value;
-
-      const r = await fetch(`${API}/api/trucks/${truckId}`, {
-        method: "PATCH",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({status})
-      });
-
-      if (!r.ok) {
-        const e = await r.json();
-        msg(`Error: ${e.detail || r.status}`);
+      if (!res.ok) {
+        msg(`Load failed (${res.status}): ${out?.detail || "Unknown error"}`, "err");
         return;
       }
 
-      msg(`Updated ${truckId} → ${status}`);
-      await refresh();
-    };
-  });
-}
+      if (!Array.isArray(out)) {
+        msg(`Unexpected response: ${JSON.stringify(out)}`, "err");
+        return;
+      }
 
-document.getElementById("addBtn").onclick = async () => {
-  const truck_id = document.getElementById("truckId").value.trim();
-  const type = document.getElementById("truckType").value;
-  const status = document.getElementById("truckStatus").value;
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = "";
 
-  if (!truck_id) { msg("truck_id required"); return; }
+      if (out.length === 0) {
+        msg("No trucks found for this owner.", "ok");
+        return;
+      }
 
-  const res = await fetch(`${API}/api/owners/me/trucks`, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({truck_id, type, status})
-  });
+      out.forEach(truck => {
+        const updated = getUpdated(truck);
+        const updatedText = updated ? new Date(updated).toLocaleString() : "-";
 
-  const out = await res.json();
-  if (!res.ok) {
-    msg(`Error: ${out.detail || res.status}`);
-    return;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${truck.truck_id}</td>
+          <td>${truck.type}</td>
+          <td><span class="badge">${truck.status}</span></td>
+          <td>
+            <select data-truck="${truck.truck_id}">
+              <option value="available" ${truck.status === "available" ? "selected": ""}>available</option>
+              <option value="out_of_service" ${truck.status === "out_of_service" ? "selected": ""}>out_of_service</option>
+              <option value="unavailable" ${truck.status === "unavailable" ? "selected": ""}>unavailable</option>
+            </select>
+            <button data-save="${truck.truck_id}">Save</button>
+          </td>
+          <td>${updatedText}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      document.querySelectorAll("button[data-save]").forEach(btn => {
+        btn.onclick = async () => {
+          const truckId = btn.dataset.save;
+          const sel = document.querySelector(`select[data-truck="${truckId}"]`);
+          const status = sel.value;
+
+          const r = await fetch(`${API}/api/trucks/${truckId}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ status })
+          });
+
+          const resp = await safeJson(r);
+
+          if (!r.ok) {
+            msg(`Update failed (${r.status}): ${resp?.detail || "Unknown error"}`, "err");
+            return;
+          }
+
+          msg(`Updated ${truckId} → ${status}`, "ok");
+          refresh();
+        };
+      });
+
+    } catch (e) {
+      msg(
+        `Network/CORS error while loading trucks.\n` +
+        `Page: ${window.location.origin}\n` +
+        `API: ${API}\n` +
+        `Error: ${e.message}\n\n` +
+        `Fix: open via http://localhost:5173/owner.html (NOT file://).`,
+        "err"
+      );
+    }
   }
 
-  msg(`Added ${out.truck_id}`);
-  document.getElementById("truckId").value = "";
-  await refresh();
-};
+  document.getElementById("addBtn").onclick = async () => {
+    const truck_id = document.getElementById("truckId").value.trim();
+    const type = document.getElementById("truckType").value;
+    const status = document.getElementById("truckStatus").value;
 
-document.getElementById("refreshBtn").onclick = refresh;
+    if (!truck_id) { msg("truck_id required", "err"); return; }
 
-refresh();
+    const res = await fetch(`${API}/api/owners/me/trucks`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ truck_id, type, status })
+    });
+
+    const out = await safeJson(res);
+
+    if (!res.ok) {
+      msg(`Add failed (${res.status}): ${out?.detail || "Unknown error"}`, "err");
+      return;
+    }
+
+    msg(`Added ${out.truck_id}`, "ok");
+    document.getElementById("truckId").value = "";
+    refresh();
+  };
+
+  document.getElementById("refreshBtn").onclick = refresh;
+  refresh();
 </script>
 </body>
 </html>
