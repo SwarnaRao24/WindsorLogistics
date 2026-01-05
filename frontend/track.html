@@ -1,0 +1,207 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Trip Tracking</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .box { padding: 10px; border: 1px solid #ddd; margin-top: 10px; }
+    .row { margin: 8px 0; }
+    input, button { padding: 8px; margin-right: 8px; }
+    #wsStatus { font-weight: bold; }
+    #msg { margin-top: 10px; padding: 8px; white-space: pre-wrap; }
+    .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+    .err { background: #ffecec; border: 1px solid #ffb3b3; }
+  </style>
+</head>
+<body>
+  <h2>Trip Tracking</h2>
+
+  <div class="box">
+    <div class="row"><b>Trip:</b> <span id="tripId">-</span></div>
+    <div class="row"><b>WS:</b> <span id="wsStatus">disconnected</span></div>
+    <hr>
+    <div class="row"><b>Lat:</b> <span id="lat">-</span></div>
+    <div class="row"><b>Lng:</b> <span id="lng">-</span></div>
+    <div class="row"><b>Speed:</b> <span id="speed">-</span></div>
+    <div class="row"><b>Time:</b> <span id="ts">-</span></div>
+  </div>
+
+  <h3>Test Location Sender (for dev)</h3>
+
+  <div class="box">
+    <div class="row">
+      <input id="testLat" placeholder="Lat" />
+      <input id="testLng" placeholder="Lng" />
+      <input id="testSpeed" placeholder="Speed" />
+    </div>
+
+    <div class="row">
+      <button id="sendBtn">Send test location</button>
+      <button id="autoBtn">Start auto move</button>
+      <span id="autoStatus">auto: off</span>
+    </div>
+
+    <div id="msg"></div>
+  </div>
+
+<script>
+  const host = window.location.hostname || "127.0.0.1";
+  const API = `http://${host}:8000`;
+
+  const params = new URLSearchParams(window.location.search);
+  const trip_id = params.get("trip_id");
+
+  const elTripId = document.getElementById("tripId");
+  const elWsStatus = document.getElementById("wsStatus");
+  const elLat = document.getElementById("lat");
+  const elLng = document.getElementById("lng");
+  const elSpeed = document.getElementById("speed");
+  const elTs = document.getElementById("ts");
+
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = text || "";
+  }
+
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  elTripId.textContent = trip_id || "-";
+
+  // Defaults (Windsor-ish)
+  const latInput = document.getElementById("testLat");
+  const lngInput = document.getElementById("testLng");
+  const speedInput = document.getElementById("testSpeed");
+  latInput.value = "42.3149";
+  lngInput.value = "-83.0364";
+  speedInput.value = "50";
+
+  // ---------------- WebSocket (Trip-based) ----------------
+  let ws = null;
+
+  function connectWS() {
+    if (!trip_id) {
+      elWsStatus.textContent = "missing trip_id";
+      return;
+    }
+
+    const wsUrl = `ws://${host}:8000/ws/trips/${encodeURIComponent(trip_id)}`;
+    ws = new WebSocket(wsUrl);
+
+    elWsStatus.textContent = "connecting...";
+
+    ws.onopen = () => {
+      elWsStatus.textContent = "connected";
+      // server is waiting in receive loop; ping keeps it alive
+      ws.send("ping");
+    };
+
+    ws.onmessage = (ev) => {
+      let data = null;
+      try { data = JSON.parse(ev.data); } catch { return; }
+
+      elLat.textContent = data.lat ?? "-";
+      elLng.textContent = data.lng ?? "-";
+      elSpeed.textContent = data.speed ?? "-";
+      elTs.textContent = data.ts ? new Date(data.ts).toLocaleString() : "-";
+    };
+
+    ws.onclose = () => {
+      elWsStatus.textContent = "disconnected";
+    };
+
+    ws.onerror = () => {
+      elWsStatus.textContent = "error";
+    };
+  }
+
+  connectWS();
+
+  // ---------------- Send test location ----------------
+  async function sendLocation(lat, lng, speed) {
+    if (!trip_id) {
+      msg("Missing trip_id in URL. Example: /track.html?trip_id=tr_xxx", "err");
+      return;
+    }
+
+    const payload = {
+      lat: Number(lat),
+      lng: Number(lng),
+      speed: speed === "" || speed == null ? null : Number(speed)
+    };
+
+    if (Number.isNaN(payload.lat) || Number.isNaN(payload.lng)) {
+      msg("Lat/Lng must be numbers.", "err");
+      return;
+    }
+
+    const res = await fetch(`${API}/api/trips/${encodeURIComponent(trip_id)}/location`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+
+    const out = await safeJson(res);
+
+    if (!res.ok) {
+      msg(`Send failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+      return;
+    }
+
+    msg(`Sent: lat=${payload.lat}, lng=${payload.lng}, speed=${payload.speed}`, "ok");
+  }
+
+  document.getElementById("sendBtn").onclick = async () => {
+    msg("");
+    await sendLocation(latInput.value, lngInput.value, speedInput.value);
+  };
+
+  // ---------------- Auto move ----------------
+  let autoTimer = null;
+  let autoOn = false;
+
+  function setAutoState(on) {
+    autoOn = on;
+    document.getElementById("autoStatus").textContent = `auto: ${on ? "on" : "off"}`;
+    document.getElementById("autoBtn").textContent = on ? "Stop auto move" : "Start auto move";
+  }
+
+  document.getElementById("autoBtn").onclick = async () => {
+    if (!trip_id) {
+      msg("Missing trip_id in URL. Example: /track.html?trip_id=tr_xxx", "err");
+      return;
+    }
+
+    if (autoOn) {
+      clearInterval(autoTimer);
+      autoTimer = null;
+      setAutoState(false);
+      msg("Auto move stopped.", "ok");
+      return;
+    }
+
+    // start auto
+    setAutoState(true);
+    msg("Auto move started. Sending updates every 1s.", "ok");
+
+    autoTimer = setInterval(async () => {
+      // tiny movement
+      const lat = Number(latInput.value) + 0.0001;
+      const lng = Number(lngInput.value) + 0.0001;
+      latInput.value = lat.toFixed(6);
+      lngInput.value = lng.toFixed(6);
+
+      // slight speed variation
+      const sp = Number(speedInput.value || "50");
+      const nextSp = Math.max(0, sp + (Math.random() * 6 - 3));
+      speedInput.value = nextSp.toFixed(0);
+
+      await sendLocation(latInput.value, lngInput.value, speedInput.value);
+    }, 1000);
+  };
+</script>
+</body>
+</html>

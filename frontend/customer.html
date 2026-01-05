@@ -9,7 +9,7 @@
     table { border-collapse: collapse; width: 100%; margin-top: 14px; }
     th, td { border: 1px solid #ddd; padding: 10px; }
     th { background: #f5f5f5; }
-    #msg { margin-top: 10px; padding: 8px; }
+    #msg { margin-top: 10px; padding: 8px; white-space: pre-wrap; }
     .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
     .err { background: #ffecec; border: 1px solid #ffb3b3; }
   </style>
@@ -19,13 +19,13 @@
 <h2>Available Trucks</h2>
 
 <div>
-    <input id="name" placeholder="Your name" />
-    <input id="pickup" placeholder="Pickup location" />
-    <input id="drop" placeholder="Drop location" />
-  
-    <!-- NEW: booking date + time -->
-    <input id="bookingDate" type="date" />
-    <input id="bookingTime" type="time" />
+  <input id="name" placeholder="Your name" />
+  <input id="pickup" placeholder="Pickup location" />
+  <input id="drop" placeholder="Drop location" />
+
+  <input id="bookingDate" type="date" />
+  <input id="bookingTime" type="time" />
+
   <button id="refreshBtn">Refresh</button>
 </div>
 
@@ -94,7 +94,7 @@
       });
 
       document.querySelectorAll("button[data-id]").forEach(btn => {
-        btn.onclick = () => book(btn.dataset.id);
+        btn.onclick = (ev) => book(btn.dataset.id, ev.target);
       });
 
     } catch (e) {
@@ -102,11 +102,11 @@
     }
   }
 
-  async function book(truck_id) {
+  async function book(truck_id, buttonEl) {
     const customer_name = document.getElementById("name").value.trim();
     const pickup_location = document.getElementById("pickup").value.trim();
     const drop_location = document.getElementById("drop").value.trim();
-    const booking_date = document.getElementById("bookingDate")?.value; // if you added date
+    const booking_date = document.getElementById("bookingDate").value;
     const booking_time = document.getElementById("bookingTime").value;
 
     if (!customer_name || !pickup_location || !drop_location) {
@@ -115,22 +115,24 @@
     }
 
     if (!booking_date || !booking_time) {
-        msg("Select booking date and time", "err");
-        return;
-      }
-      
+      msg("Select booking date and time", "err");
+      return;
+    }
+
+    if (buttonEl) buttonEl.disabled = true;
+
     try {
       const res = await fetch(`${API}/api/bookings`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
-            truck_id,
-            customer_name,
-            pickup_location,
-            drop_location,
-            booking_date,
-            booking_time
-          })
+          truck_id,
+          customer_name,
+          pickup_location,
+          drop_location,
+          booking_date,
+          booking_time
+        })
       });
 
       const out = await safeJson(res);
@@ -140,23 +142,35 @@
         return;
       }
 
-      const customer = customer_name; // already trimmed
+      // ✅ Correct fields from backend response
+      const tripId = out?.trip?.trip_id;
+      const bookingId = out?.booking?.booking_id;
+      const bookedTruckId = out?.booking?.truck_id;
+
+      if (!tripId) {
+        msg(`Booked, but no trip_id returned. Response: ${JSON.stringify(out)}`, "err");
+        return;
+      }
+
       msg(
-  `Dear ${customer}, your booking for ${out.booking.truck_id} is confirmed. Booking ID: ${out.booking.booking_id}`,
-  "ok"
-);      
-      await loadTrucks();
+        `Dear ${customer_name}, your booking for ${bookedTruckId} is confirmed.\nBooking ID: ${bookingId}\nTrip ID: ${tripId}\nRedirecting to tracking...`,
+        "ok"
+      );
+
+      // ✅ Go to tracking page (trip-based)
+      window.location.href = `/track.html?trip_id=${encodeURIComponent(tripId)}`;
 
     } catch (e) {
       msg(`Network error: ${e.message}`, "err");
+    } finally {
+      if (buttonEl) buttonEl.disabled = false;
     }
-  }  
+  }
 
   document.getElementById("refreshBtn").onclick = loadTrucks;
-  // Set default booking date = today
   document.getElementById("bookingDate").value = new Date().toISOString().slice(0,10);
-// Load available trucks
-loadTrucks();
+
+  loadTrucks();
 </script>
 </body>
 </html>

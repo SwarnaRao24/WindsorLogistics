@@ -13,6 +13,7 @@
     #msg { margin-top: 10px; padding: 8px; }
     .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
     .err { background: #ffecec; border: 1px solid #ffb3b3; }
+    .box { padding: 10px; border: 1px solid #ddd; margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -29,7 +30,7 @@
     <select id="truckStatus">
       <option value="available">available</option>
       <option value="out_of_service">out_of_service</option>
-      <option value="unavailable">unavailable</option>
+      <option value="booked">booked</option>
     </select>
     <button id="addBtn">Add</button>
   </div>
@@ -51,6 +52,32 @@
     <tbody id="rows"></tbody>
   </table>
 
+  <h3>Trips</h3>
+  <button id="tripsRefreshBtn">Refresh Trips</button>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Trip ID</th>
+        <th>Truck ID</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="tripRows"></tbody>
+  </table>
+
+  <h3>Live Trip Tracking</h3>
+  <div class="box">
+    <div><b>Trip:</b> <span id="activeTripId">-</span></div>
+    <div><b>Lat:</b> <span id="lat">-</span></div>
+    <div><b>Lng:</b> <span id="lng">-</span></div>
+    <div><b>Speed:</b> <span id="speed">-</span></div>
+    <div><b>Time:</b> <span id="ts">-</span></div>
+    <div><b>WS:</b> <span id="wsStatus">disconnected</span></div>
+  </div>
+
 <script>
   const host = window.location.hostname || "127.0.0.1";
   const API = `http://${host}:8000`;
@@ -69,6 +96,7 @@
     return truck.updated_at || truck.updatedAt || truck.ts || truck.created_at || null;
   }
 
+  // ---------------- Trucks ----------------
   async function refresh() {
     msg("");
 
@@ -107,7 +135,7 @@
             <select data-truck="${truck.truck_id}">
               <option value="available" ${truck.status === "available" ? "selected": ""}>available</option>
               <option value="out_of_service" ${truck.status === "out_of_service" ? "selected": ""}>out_of_service</option>
-              <option value="unavailable" ${truck.status === "unavailable" ? "selected": ""}>unavailable</option>
+              <option value="booked" ${truck.status === "booked" ? "selected": ""}>booked</option>
             </select>
             <button data-save="${truck.truck_id}">Save</button>
           </td>
@@ -141,14 +169,7 @@
       });
 
     } catch (e) {
-      msg(
-        `Network/CORS error while loading trucks.\n` +
-        `Page: ${window.location.origin}\n` +
-        `API: ${API}\n` +
-        `Error: ${e.message}\n\n` +
-        `Fix: open via http://localhost:5173/owner.html (NOT file://).`,
-        "err"
-      );
+      msg(`Network/CORS error: ${e.message}`, "err");
     }
   }
 
@@ -178,7 +199,85 @@
   };
 
   document.getElementById("refreshBtn").onclick = refresh;
+
+  // ---------------- Trips ----------------
+  let tripWS = null;
+
+  async function loadTrips() {
+    try {
+      const res = await fetch(`${API}/api/owners/me/trips`);
+      const out = await safeJson(res);
+
+      if (!res.ok) {
+        msg(`Trips load failed (${res.status}): ${out?.detail || "Unknown error"}`, "err");
+        return;
+      }
+
+      const tbody = document.getElementById("tripRows");
+      tbody.innerHTML = "";
+
+      if (!Array.isArray(out) || out.length === 0) {
+        msg("No trips found.", "ok");
+        return;
+      }
+
+      out.forEach(t => {
+        const createdText = t.created_at ? new Date(t.created_at).toLocaleString() : "-";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${t.trip_id}</td>
+          <td>${t.truck_id}</td>
+          <td>${t.status}</td>
+          <td>${createdText}</td>
+          <td><button data-track-trip="${t.trip_id}">Track</button></td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      document.querySelectorAll("button[data-track-trip]").forEach(btn => {
+        btn.onclick = () => startTripTracking(btn.dataset.trackTrip);
+      });
+
+    } catch (e) {
+      msg(`Trips network error: ${e.message}`, "err");
+    }
+  }
+
+  function startTripTracking(trip_id) {
+    if (tripWS) {
+      tripWS.close();
+      tripWS = null;
+    }
+
+    document.getElementById("activeTripId").textContent = trip_id;
+    document.getElementById("wsStatus").textContent = "connecting...";
+
+    const wsUrl = `ws://${host}:8000/ws/trips/${encodeURIComponent(trip_id)}`;
+    tripWS = new WebSocket(wsUrl);
+
+    tripWS.onopen = () => {
+      document.getElementById("wsStatus").textContent = "connected";
+      tripWS.send("ping");
+    };
+
+    tripWS.onmessage = (ev) => {
+      let data = null;
+      try { data = JSON.parse(ev.data); } catch { return; }
+      document.getElementById("lat").textContent = data.lat ?? "-";
+      document.getElementById("lng").textContent = data.lng ?? "-";
+      document.getElementById("speed").textContent = data.speed ?? "-";
+      document.getElementById("ts").textContent = data.ts ? new Date(data.ts).toLocaleString() : "-";
+    };
+
+    tripWS.onclose = () => document.getElementById("wsStatus").textContent = "disconnected";
+    tripWS.onerror = () => document.getElementById("wsStatus").textContent = "error";
+  }
+
+  document.getElementById("tripsRefreshBtn").onclick = loadTrips;
+
+  // initial loads
   refresh();
+  loadTrips();
 </script>
 </body>
 </html>
