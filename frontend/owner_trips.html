@@ -1,0 +1,367 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Owner – Trips</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    input, button, select { padding: 8px; margin-right: 6px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 14px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background: #f5f5f5; }
+    #msg { margin-top: 10px; padding: 8px; white-space: pre-wrap; }
+    .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+    .err { background: #ffecec; border: 1px solid #ffb3b3; }
+    .badge { padding: 2px 10px; border-radius: 12px; display: inline-block; border: 1px solid #ddd; }
+    .row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .box { border:1px solid #ddd; padding:12px; border-radius:8px; margin:12px 0; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <h2>Owner Trips</h2>
+
+  <!-- CREATE TRIP -->
+  <div class="box">
+    <h3 style="margin:0 0 10px 0;">Create Trip</h3>
+
+    <div class="row">
+      <input id="c_trip" placeholder="trip_id (e.g., tr_001)" />
+      <input id="c_customer" placeholder="customer_id (e.g., customer-1)" />
+      <input id="c_driver" placeholder="driver_id (e.g., driver-1)" />
+      <input id="c_truck" placeholder="truck_id (optional)" />
+    </div>
+
+    <div class="row" style="align-items:center; margin-top:10px;">
+      <label>Planned ETA:</label>
+      <input id="c_eta" type="datetime-local" />
+      <button id="createBtn">Create</button>
+    </div>
+  </div>
+
+  <div>
+    <button id="refreshBtn">Refresh</button>
+    <button id="logoutBtn">Logout</button>
+  </div>
+
+  <div id="msg"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Trip ID</th>
+        <th>Truck ID</th>
+        <th>Status</th>
+        <th>Change Status</th>
+        <th>Planned ETA</th>
+        <th>Set ETA</th>
+        <th>Delay</th>
+        <th>Created</th>
+        <th>Updated</th>
+        <th>Share</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+<script>
+  // Prefer same-origin, fallback to hostname:8000
+  const host = window.location.hostname || "127.0.0.1";
+  const API = window.location.origin.includes(":8000")
+    ? window.location.origin
+    : `http://${host}:8000`;
+
+  // === DEV LOGIN (matches auth.py: owner-*/driver-*/customer-*) ===
+  const TOKEN_KEY = "wl_token";
+  const DEV_LOGIN = { username: "owner-1", password: "password" };
+
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = text || "";
+  }
+
+  function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
+  function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+  function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  function fmtDateMs(ms) {
+    if (!ms) return "-";
+    const d = new Date(ms);
+    return isNaN(d.getTime()) ? String(ms) : d.toLocaleString();
+  }
+
+  function fmtDateAny(v) {
+    if (!v) return "-";
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+  }
+
+  function dtLocalToMs(v) {
+    if (!v) return null;
+    const d = new Date(v);
+    const ms = d.getTime();
+    return isNaN(ms) ? null : ms;
+  }
+
+  function msToDtLocal(ms) {
+    if (!ms) return "";
+    const d = new Date(ms);
+    if (isNaN(d.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const mm = pad(d.getMonth() + 1);
+    const dd = pad(d.getDate());
+    const hh = pad(d.getHours());
+    const min = pad(d.getMinutes());
+    return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+  }
+
+  function delayBadge(delayMinutes, delayColor) {
+    if (delayMinutes === null || delayMinutes === undefined || delayColor === null || delayColor === undefined) return "-";
+    const text = `${delayMinutes} min`;
+    const color = String(delayColor).toLowerCase();
+    let border = "#ddd";
+    let bg = "#fff";
+    if (color === "green") { border = "#9be3b7"; bg = "#e8fff0"; }
+    if (color === "yellow") { border = "#f3d78a"; bg = "#fff7db"; }
+    if (color === "red") { border = "#ffb3b3"; bg = "#ffecec"; }
+    return `<span class="badge" style="border-color:${border}; background:${bg};">${text}</span>`;
+  }
+
+  async function login() {
+    const res = await fetch(`${API}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(DEV_LOGIN),
+    });
+
+    const out = await safeJson(res);
+    if (!res.ok) throw new Error(out?.detail || "Login failed");
+
+    const token = out?.access_token;
+    if (!token) throw new Error("Login response missing access_token");
+
+    setToken(token);
+    return token;
+  }
+
+  async function apiFetch(path, opts = {}) {
+    let token = getToken();
+    if (!token) token = await login();
+
+    const headers = { ...(opts.headers || {}), Authorization: `Bearer ${token}` };
+    let res = await fetch(`${API}${path}`, { ...opts, headers });
+
+    if (res.status === 401) {
+      token = await login();
+      const headers2 = { ...(opts.headers || {}), Authorization: `Bearer ${token}` };
+      res = await fetch(`${API}${path}`, { ...opts, headers: headers2 });
+    }
+
+    return res;
+  }
+
+  async function createTrip() {
+    msg("");
+
+    const trip_id = document.getElementById("c_trip").value.trim();
+    const customer_id = document.getElementById("c_customer").value.trim();
+    const driver_id = document.getElementById("c_driver").value.trim();
+    const truck_id = document.getElementById("c_truck").value.trim();
+    const planned_eta_ms = dtLocalToMs(document.getElementById("c_eta").value);
+
+    if (!trip_id || !customer_id || !driver_id) {
+      msg("trip_id, customer_id, driver_id are required", "err");
+      return;
+    }
+
+    const body = {
+      trip_id,
+      customer_id,
+      driver_id,
+      truck_id: truck_id || null,
+      planned_eta_ms: planned_eta_ms || null,
+      status: "scheduled",
+    };
+
+    const res = await apiFetch(`/api/trips`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const out = await safeJson(res);
+    if (!res.ok) {
+      msg(`Create trip failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+      return;
+    }
+
+    msg(`Trip created: ${trip_id}`, "ok");
+    await loadTrips();
+  }
+
+  async function updateTrip(trip_id, patch) {
+    const res = await apiFetch(`/api/trips/${encodeURIComponent(trip_id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+
+    const out = await safeJson(res);
+    if (!res.ok) {
+      msg(`Update failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+      return false;
+    }
+    return true;
+  }
+
+  async function generateOtp(trip_id) {
+    msg("");
+
+    const res = await apiFetch(`/api/trips/${encodeURIComponent(trip_id)}/share-otp`, {
+      method: "POST",
+    });
+
+    const out = await safeJson(res);
+    if (!res.ok) {
+      msg(`OTP failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+      return;
+    }
+
+    // FIX: tracking page is served from /static/track.html
+    const link = `${location.origin}/static/track.html?otp=${out.otp}`;
+    msg(`OTP for ${trip_id}: ${out.otp}\nLink: ${link}\nExpires: ${fmtDateMs(out.expires_ms)}`, "ok");
+  }
+
+  async function loadTrips() {
+    msg("");
+
+    try {
+      const res = await apiFetch(`/api/trips`);
+      const out = await safeJson(res);
+
+      if (!res.ok) {
+        msg(`Trips failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+        return;
+      }
+
+      if (!Array.isArray(out)) {
+        msg(`Unexpected response: ${JSON.stringify(out)}`, "err");
+        return;
+      }
+
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = "";
+
+      if (out.length === 0) {
+        msg("No trips found.", "ok");
+        return;
+      }
+
+      out.forEach(t => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${t.trip_id || "-"}</td>
+          <td>${t.truck_id || "-"}</td>
+          <td><span class="badge">${t.status || "-"}</span></td>
+
+          <td>
+            <div class="row-actions">
+              <select data-trip="${t.trip_id}">
+                <option value="scheduled" ${t.status === "scheduled" ? "selected" : ""}>scheduled</option>
+                <option value="in_transit" ${t.status === "in_transit" ? "selected" : ""}>in_transit</option>
+                <option value="delayed" ${t.status === "delayed" ? "selected" : ""}>delayed</option>
+                <option value="delivered" ${t.status === "delivered" ? "selected" : ""}>delivered</option>
+                <option value="cancelled" ${t.status === "cancelled" ? "selected" : ""}>cancelled</option>
+              </select>
+              <button data-save="${t.trip_id}">Save</button>
+            </div>
+          </td>
+
+          <td>${fmtDateMs(t.planned_eta_ms)}</td>
+
+          <td>
+            <div class="row-actions">
+              <input type="datetime-local" data-eta="${t.trip_id}" />
+              <button data-save-eta="${t.trip_id}">Save ETA</button>
+            </div>
+          </td>
+
+          <td>${delayBadge(t.delay_minutes, t.delay_color)}</td>
+          <td>${fmtDateAny(t.created_at || t.created_at_ms)}</td>
+          <td>${fmtDateAny(t.updated_at || t.updated_at_ms)}</td>
+
+          <td>
+            <button data-otp="${t.trip_id}">OTP</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      // Prefill ETA inputs
+      document.querySelectorAll("input[data-eta]").forEach(inp => {
+        const tripId = inp.dataset.eta;
+        const trip = out.find(x => x.trip_id === tripId);
+        inp.value = msToDtLocal(trip?.planned_eta_ms);
+      });
+
+      // wire Save status buttons
+      document.querySelectorAll("button[data-save]").forEach(btn => {
+        btn.onclick = async () => {
+          const tripId = btn.dataset.save;
+          const sel = document.querySelector(`select[data-trip="${CSS.escape(tripId)}"]`);
+          const status = sel.value;
+
+          const ok = await updateTrip(tripId, { status });
+          if (!ok) return;
+
+          msg(`Updated ${tripId} → ${status}`, "ok");
+          loadTrips();
+        };
+      });
+
+      // wire Save ETA buttons
+      document.querySelectorAll("button[data-save-eta]").forEach(btn => {
+        btn.onclick = async () => {
+          const tripId = btn.dataset.saveEta;
+          const inp = document.querySelector(`input[data-eta="${CSS.escape(tripId)}"]`);
+          const etaMs = dtLocalToMs(inp.value);
+
+          const ok = await updateTrip(tripId, { planned_eta_ms: etaMs });
+          if (!ok) return;
+
+          msg(`Updated ETA for ${tripId}`, "ok");
+          loadTrips();
+        };
+      });
+
+      // wire OTP buttons
+      document.querySelectorAll("button[data-otp]").forEach(btn => {
+        btn.onclick = async () => {
+          const tripId = btn.dataset.otp;
+          await generateOtp(tripId);
+        };
+      });
+
+      msg(`Loaded ${out.length} trips.`, "ok");
+    } catch (e) {
+      msg(`Error: ${e.message}`, "err");
+    }
+  }
+
+  document.getElementById("refreshBtn").onclick = loadTrips;
+  document.getElementById("logoutBtn").onclick = () => {
+    clearToken();
+    msg("Logged out (token cleared). Refresh will login again.", "ok");
+  };
+  document.getElementById("createBtn").onclick = createTrip;
+
+  loadTrips();
+</script>
+</body>
+</html>
