@@ -234,7 +234,7 @@
     }
 
     // FIX: tracking page is served from /static/track.html
-    const link = `${location.origin}/static/track.html?otp=${out.otp}`;
+    const link = `${location.origin}/static/share.html?otp=${out.otp}`;
     msg(`OTP for ${trip_id}: ${out.otp}\nLink: ${link}\nExpires: ${fmtDateMs(out.expires_ms)}`, "ok");
   }
 

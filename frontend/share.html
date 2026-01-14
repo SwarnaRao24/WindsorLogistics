@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Track a Trip</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .box { border: 1px solid #ddd; border-radius: 8px; padding: 14px; max-width: 520px; }
+    .row { margin: 10px 0; }
+    input, button { padding: 10px; font-size: 16px; }
+    input { width: 220px; letter-spacing: 3px; }
+    #msg { margin-top: 10px; padding: 8px; white-space: pre-wrap; }
+    .ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+    .err { background: #ffecec; border: 1px solid #ffb3b3; }
+    small { color: #666; }
+  </style>
+</head>
+<body>
+  <h2>Track a Trip</h2>
+
+  <div class="box">
+    <div class="row">
+      <label><b>Enter OTP</b></label><br/>
+      <input id="otp" placeholder="6-digit OTP" maxlength="6" inputmode="numeric" />
+      <button id="goBtn">Track</button>
+    </div>
+
+    <small>
+      If you don’t have an OTP, ask the trip owner for a tracking code.
+    </small>
+
+    <div id="msg"></div>
+  </div>
+
+<script>
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = text || "";
+  }
+
+  function normalizeOtp(v) {
+    return (v || "").replace(/\D/g, "").slice(0, 6);
+  }
+
+  const otpInput = document.getElementById("otp");
+  otpInput.addEventListener("input", () => {
+    otpInput.value = normalizeOtp(otpInput.value);
+  });
+
+  function go() {
+    msg("");
+    const otp = normalizeOtp(otpInput.value);
+
+    if (otp.length !== 6) {
+      msg("OTP must be 6 digits.", "err");
+      return;
+    }
+
+    // Redirect to tracking page which resolves otp -> trip_id
+    window.location.href = `/static/track.html?otp=${encodeURIComponent(otp)}`;
+  }
+
+  document.getElementById("goBtn").onclick = go;
+
+  // allow Enter key
+  otpInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") go();
+  });
+
+  // If someone opens /static/share.html?otp=123456, auto-fill and go
+  const params = new URLSearchParams(window.location.search);
+  const otpFromUrl = normalizeOtp(params.get("otp"));
+  if (otpFromUrl.length === 6) {
+    otpInput.value = otpFromUrl;
+    go();
+  }
+</script>
+</body>
+</html>
