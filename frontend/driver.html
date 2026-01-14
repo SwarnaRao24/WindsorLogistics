@@ -1,0 +1,232 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Driver – Send Location</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; }
+.box { padding: 10px; border: 1px solid #ddd; margin-top: 10px; }
+.row { margin: 8px 0; }
+input, button { padding: 8px; margin-right: 8px; }
+#msg { margin-top: 10px; padding: 8px; white-space: pre-wrap; }
+.ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+.err { background: #ffecec; border: 1px solid #ffb3b3; }
+</style>
+</head>
+
+<body>
+<h2>Driver Console</h2>
+
+<div class="box">
+  <div class="row"><b>Trip:</b> <span id="tripId">-</span></div>
+  <div class="row"><b>Driver:</b> <span id="driverUser">driver-1</span></div>
+  <div class="row"><b>Status:</b> <span id="state">idle</span></div>
+  <div id="msg"></div>
+</div>
+
+<h3>Manual Send (dev)</h3>
+<div class="box">
+  <div class="row">
+    <input id="testLat" placeholder="Lat" />
+    <input id="testLng" placeholder="Lng" />
+    <input id="testSpeed" placeholder="Speed" />
+  </div>
+  <div class="row">
+    <button id="sendBtn">Send location</button>
+    <button id="autoBtn">Start auto move</button>
+    <span id="autoStatus">auto: off</span>
+  </div>
+</div>
+
+<h3>Real GPS</h3>
+<div class="box">
+  <button id="gpsStartBtn">Start GPS</button>
+  <button id="gpsStopBtn">Stop GPS</button>
+  <span id="gpsStatus">idle</span>
+</div>
+
+<script>
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = text || "";
+  }
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  // API base
+  const host = window.location.hostname || "127.0.0.1";
+  const API = window.location.origin.includes(":8000")
+    ? window.location.origin
+    : `http://${host}:8000`;
+
+  // Read trip_id
+  const params = new URLSearchParams(window.location.search);
+  const trip_id = params.get("trip_id");
+
+  document.getElementById("tripId").textContent = trip_id || "-";
+
+  // Defaults (Windsor-ish)
+  const latInput = document.getElementById("testLat");
+  const lngInput = document.getElementById("testLng");
+  const speedInput = document.getElementById("testSpeed");
+  latInput.value = "42.3149";
+  lngInput.value = "-83.0364";
+  speedInput.value = "50";
+
+  // Driver auth
+  let driverToken = null;
+
+  async function driverLoginDev() {
+    const res = await fetch(`${API}/api/auth/login`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ username: "driver-1", password: "password" })
+    });
+    const out = await safeJson(res);
+    if (!res.ok) throw new Error(out?.detail || `Driver login failed (${res.status})`);
+    return out.access_token;
+  }
+
+  async function ensureDriverToken() {
+    if (!driverToken) driverToken = await driverLoginDev();
+    return driverToken;
+  }
+
+  async function sendLocation(lat, lng, speed) {
+    if (!trip_id) {
+      msg("Missing trip_id. Open /static/driver.html?trip_id=tr_001", "err");
+      return;
+    }
+
+    const payload = {
+      lat: Number(lat),
+      lng: Number(lng),
+      speed: speed === "" || speed == null ? null : Number(speed),
+      ts: Date.now()
+    };
+
+    if (Number.isNaN(payload.lat) || Number.isNaN(payload.lng)) {
+      msg("Lat/Lng must be numbers.", "err");
+      return;
+    }
+
+    try {
+      const token = await ensureDriverToken();
+      const res = await fetch(`${API}/api/trips/${encodeURIComponent(trip_id)}/location`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const out = await safeJson(res);
+      if (!res.ok) {
+        msg(`Send failed (${res.status}): ${out?.detail || JSON.stringify(out) || "Unknown error"}`, "err");
+        return;
+      }
+
+      msg(`Sent: lat=${payload.lat}, lng=${payload.lng}, speed=${payload.speed}`, "ok");
+    } catch (e) {
+      msg(`Error: ${e.message}`, "err");
+    }
+  }
+
+  document.getElementById("sendBtn").onclick = async () => {
+    msg("");
+    await sendLocation(latInput.value, lngInput.value, speedInput.value);
+  };
+
+  // Auto move
+  let autoTimer = null;
+  let autoOn = false;
+
+  function setAutoState(on) {
+    autoOn = on;
+    document.getElementById("autoStatus").textContent = `auto: ${on ? "on" : "off"}`;
+    document.getElementById("autoBtn").textContent = on ? "Stop auto move" : "Start auto move";
+  }
+
+  document.getElementById("autoBtn").onclick = async () => {
+    if (!trip_id) {
+      msg("Missing trip_id. Open /static/driver.html?trip_id=tr_001", "err");
+      return;
+    }
+
+    if (autoOn) {
+      clearInterval(autoTimer);
+      autoTimer = null;
+      setAutoState(false);
+      msg("Auto move stopped.", "ok");
+      return;
+    }
+
+    setAutoState(true);
+    msg("Auto move started. Sending every 1s.", "ok");
+
+    autoTimer = setInterval(async () => {
+      const lat = Number(latInput.value) + 0.0001;
+      const lng = Number(lngInput.value) + 0.0001;
+      latInput.value = lat.toFixed(6);
+      lngInput.value = lng.toFixed(6);
+
+      const sp = Number(speedInput.value || "50");
+      const nextSp = Math.max(0, sp + (Math.random() * 6 - 3));
+      speedInput.value = nextSp.toFixed(0);
+
+      await sendLocation(latInput.value, lngInput.value, speedInput.value);
+    }, 1000);
+  };
+
+  // Real GPS
+  let gpsWatchId = null;
+
+  document.getElementById("gpsStartBtn").onclick = async () => {
+    if (!trip_id) {
+      msg("Missing trip_id. Open /static/driver.html?trip_id=tr_001", "err");
+      return;
+    }
+    if (!navigator.geolocation) {
+      msg("Geolocation not supported in this browser", "err");
+      return;
+    }
+
+    try {
+      await ensureDriverToken();
+    } catch (e) {
+      msg(`Driver login failed: ${e.message}`, "err");
+      return;
+    }
+
+    document.getElementById("gpsStatus").textContent = "starting...";
+
+    gpsWatchId = navigator.geolocation.watchPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const speed = pos.coords.speed; // m/s
+
+        await sendLocation(lat, lng, speed);
+        document.getElementById("gpsStatus").textContent = "sending...";
+      },
+      (err) => {
+        msg("GPS error: " + err.message, "err");
+        document.getElementById("gpsStatus").textContent = "error";
+      },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
+    );
+  };
+
+  document.getElementById("gpsStopBtn").onclick = () => {
+    if (gpsWatchId !== null) {
+      navigator.geolocation.clearWatch(gpsWatchId);
+      gpsWatchId = null;
+    }
+    document.getElementById("gpsStatus").textContent = "stopped";
+  };
+</script>
+</body>
+</html>

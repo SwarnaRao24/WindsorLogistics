@@ -1,0 +1,242 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Customer – Trip Tracking</title>
+
+<!-- Leaflet (map) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; }
+.box { padding: 10px; border: 1px solid #ddd; margin-top: 10px; }
+.row { margin: 8px 0; }
+#wsStatus { font-weight: bold; }
+#msg { margin-top: 10px; padding: 8px; white-space: pre-wrap; }
+.ok { background: #e8fff0; border: 1px solid #b7f0cc; }
+.err { background: #ffecec; border: 1px solid #ffb3b3; }
+#map { height: 420px; margin-top: 10px; border: 1px solid #ddd; }
+.badge { padding: 2px 10px; border-radius: 12px; display: inline-block; border: 1px solid #ddd; }
+</style>
+</head>
+
+<body>
+<h2>Trip Tracking</h2>
+
+<div class="box">
+  <div class="row"><b>Trip:</b> <span id="tripId">-</span></div>
+  <div class="row"><b>WS:</b> <span id="wsStatus">disconnected</span></div>
+  <div class="row"><b>ETA:</b> <span id="etaText">-</span></div>
+  <div class="row"><b>Delay:</b> <span id="delayText">-</span></div>
+  <hr>
+  <div class="row"><b>Lat:</b> <span id="lat">-</span></div>
+  <div class="row"><b>Lng:</b> <span id="lng">-</span></div>
+  <div class="row"><b>Speed:</b> <span id="speed">-</span></div>
+  <div class="row"><b>Time:</b> <span id="ts">-</span></div>
+
+  <div id="map"></div>
+  <div id="msg"></div>
+</div>
+
+<script>
+  // ---------------- Basic helpers ----------------
+  const msgBox = document.getElementById("msg");
+  function msg(text, kind="") {
+    msgBox.className = kind;
+    msgBox.textContent = text || "";
+  }
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  // API base: prefer same-origin, fallback to hostname:8000
+  const host = window.location.hostname || "127.0.0.1";
+  const API = window.location.origin.includes(":8000")
+    ? window.location.origin
+    : `http://${host}:8000`;
+
+  // ---------------- Read URL params ----------------
+  const params = new URLSearchParams(window.location.search);
+  let trip_id = params.get("trip_id");
+  const otp = params.get("otp");
+
+  // UI elements
+  const elTripId = document.getElementById("tripId");
+  const elWsStatus = document.getElementById("wsStatus");
+  const elLat = document.getElementById("lat");
+  const elLng = document.getElementById("lng");
+  const elSpeed = document.getElementById("speed");
+  const elTs = document.getElementById("ts");
+  const elEtaText = document.getElementById("etaText");
+  const elDelayText = document.getElementById("delayText");
+
+  // ---------------- OTP -> trip_id resolve ----------------
+  async function resolveOtpToTripId(otpCode) {
+    const res = await fetch(`${API}/api/public/resolve-otp?otp=${encodeURIComponent(otpCode)}`);
+    const out = await safeJson(res);
+    if (!res.ok) throw new Error(out?.detail || `OTP resolve failed (${res.status})`);
+    return out.trip_id;
+  }
+
+  // ---------------- Fetch public trip ----------------
+  async function fetchPublicTrip(tripId) {
+    const res = await fetch(`${API}/api/public/trips/${encodeURIComponent(tripId)}`);
+    const out = await safeJson(res);
+    if (!res.ok) throw new Error(out?.detail || `Trip fetch failed (${res.status})`);
+    return out;
+  }
+
+  // ---------------- ETA countdown ----------------
+  let plannedEtaMs = null;
+  let etaTimer = null;
+
+  function formatCountdown(ms) {
+    if (ms == null) return "-";
+    const diff = ms - Date.now();
+    const totalSec = Math.floor(diff / 1000);
+    if (totalSec <= 0) return "ETA passed";
+
+    const mins = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+
+    if (mins >= 60) {
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return `${h}h ${m}m`;
+    }
+    return `${mins}m ${sec}s`;
+  }
+
+  function startEtaTimer() {
+    if (etaTimer) clearInterval(etaTimer);
+    etaTimer = setInterval(() => {
+      elEtaText.textContent = plannedEtaMs ? formatCountdown(plannedEtaMs) : "-";
+    }, 1000);
+  }
+
+  function delayText(delayMinutes, delayColor) {
+    if (delayMinutes == null || !delayColor) return "-";
+    return `${delayMinutes} min (${delayColor})`;
+  }
+
+  // ---------------- Map (Leaflet) ----------------
+  let map = null;
+  let marker = null;
+  let pathLine = null;
+  let pathCoords = [];
+
+  function initMap(lat, lng) {
+    if (map) return;
+    map = L.map("map").setView([lat, lng], 13);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
+    marker = L.marker([lat, lng]).addTo(map);
+    pathCoords = [[lat, lng]];
+    pathLine = L.polyline(pathCoords).addTo(map);
+  }
+
+  function updateMap(lat, lng) {
+    if (!map) initMap(lat, lng);
+    marker.setLatLng([lat, lng]);
+    pathCoords.push([lat, lng]);
+    if (pathCoords.length > 500) pathCoords.shift();
+    pathLine.setLatLngs(pathCoords);
+    map.panTo([lat, lng], { animate: true });
+  }
+
+  // ---------------- WebSocket ----------------
+  let ws = null;
+
+  function connectWS() {
+    if (!trip_id) {
+      elWsStatus.textContent = "missing trip_id";
+      return;
+    }
+
+    const wsProto = API.startsWith("https://") ? "wss" : "ws";
+    const wsBase = API.replace(/^https?:\/\//, "");
+    const wsUrl = `${wsProto}://${wsBase}/ws/trips/${encodeURIComponent(trip_id)}`;
+
+    ws = new WebSocket(wsUrl);
+    elWsStatus.textContent = "connecting...";
+
+    ws.onopen = () => {
+      elWsStatus.textContent = "connected";
+      ws.send("ping");
+    };
+
+    ws.onmessage = (ev) => {
+      let data = null;
+      try { data = JSON.parse(ev.data); } catch { return; }
+
+      elLat.textContent = data.lat ?? "-";
+      elLng.textContent = data.lng ?? "-";
+      elSpeed.textContent = data.speed ?? "-";
+      elTs.textContent = data.ts ? new Date(data.ts).toLocaleString() : "-";
+
+      if (data.lat != null && data.lng != null) {
+        updateMap(Number(data.lat), Number(data.lng));
+      }
+
+      if (data.delay_minutes != null && data.delay_color) {
+        elDelayText.textContent = delayText(data.delay_minutes, data.delay_color);
+        elWsStatus.textContent = `connected (${data.delay_color})`;
+      }
+    };
+
+    ws.onclose = () => { elWsStatus.textContent = "disconnected"; };
+    ws.onerror = () => { elWsStatus.textContent = "error"; };
+  }
+
+  // ---------------- Startup ----------------
+  async function main() {
+    if (!trip_id && otp) {
+      elWsStatus.textContent = "resolving otp...";
+      try {
+        trip_id = await resolveOtpToTripId(otp);
+      } catch (e) {
+        elWsStatus.textContent = "otp error";
+        msg(e.message, "err");
+        return;
+      }
+    }
+
+    elTripId.textContent = trip_id || "-";
+    if (!trip_id) {
+      elWsStatus.textContent = "missing trip_id";
+      msg("Open with /static/customer_track.html?otp=123456", "err");
+      return;
+    }
+
+    // initial snapshot
+    try {
+      const trip = await fetchPublicTrip(trip_id);
+      plannedEtaMs = trip.planned_eta_ms || null;
+      startEtaTimer();
+
+      if (trip.last_location?.lat != null && trip.last_location?.lng != null) {
+        updateMap(Number(trip.last_location.lat), Number(trip.last_location.lng));
+        elLat.textContent = trip.last_location.lat;
+        elLng.textContent = trip.last_location.lng;
+        elSpeed.textContent = trip.last_location.speed ?? "-";
+        elTs.textContent = trip.last_location.ts ? new Date(trip.last_location.ts).toLocaleString() : "-";
+      } else {
+        // initialize map to Windsor if no last location
+        initMap(42.3149, -83.0364);
+      }
+
+      if (trip.delay_minutes != null && trip.delay_color) {
+        elDelayText.textContent = delayText(trip.delay_minutes, trip.delay_color);
+      }
+    } catch (e) {
+      msg(`Could not load trip details: ${e.message}`, "err");
+      initMap(42.3149, -83.0364);
+    }
+
+    connectWS();
+  }
+
+  main();
+</script>
+</body>
+</html>
